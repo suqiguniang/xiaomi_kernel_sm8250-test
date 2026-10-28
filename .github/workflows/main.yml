@@ -90,7 +90,14 @@ jobs:
           # 4.19 手动 hook 补丁（SukiSU 提供，manual hook 模式必需）
           wget -q -O ksu_hooks_sukisu_4.19.patch \
             https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch
-          patch -p1 < ksu_hooks_sukisu_4.19.patch
+          if patch -p1 --forward --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
+            patch -p1 --forward < ksu_hooks_sukisu_4.19.patch
+          elif patch -p1 --reverse --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
+            echo "[skip] 4.19 hook 补丁已存在"
+          else
+            echo "[error] 4.19 hook 补丁无法应用"
+            exit 1
+          fi
 
           # 清掉旧的 KSU 集成（含已废弃的 KernelSU / KernelSU-Next 目录）
           rm -rf KernelSU KernelSU-Next drivers/kernelsu drivers/ksu
