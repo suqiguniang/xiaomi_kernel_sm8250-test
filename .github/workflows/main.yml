@@ -1,17 +1,40 @@
-name: 构建小米sm8250 hyperOS-kernel-next
+name: 构建小米 sm8250 (munch) HyperOS 内核
 
+# 说明：
+#  - 内核源码默认取本仓库的 munch15-base 分支（缺失时回退 Winkmoon 仓库），改完直接点 Run workflow 即可。
+#  - KernelSU-Next 钉版本：4.19 是非 GKI 老内核，必须用上游的 *-legacy 线（v3.4.2 那种重构版没有 compat 层）。
+#  - Droidspaces 资产（配置块 / 补丁 / 校验清单）放在本仓库 droidspaces/ 目录，构建时自动套到内核树上。
 on:
   workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核源码分支（优先本仓库，缺失则回退 Winkmoon 仓库）'
+        required: false
+        default: 'munch15-base'
+      ksu_repo:
+        description: 'KernelSU-Next 源码仓库'
+        required: false
+        default: 'https://github.com/KernelSU-Next/KernelSU-Next'
+      ksu_ref:
+        description: 'KernelSU-Next 版本（tag / 分支 / commit）。4.19 非 GKI 请用 *-legacy 线'
+        required: false
+        default: 'v3.4.0-legacy'
 
 jobs:
   build:
     name: Build Kernel
     runs-on: ubuntu-22.04
+    env:
+      KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'munch15-base' }}
+      KSU_REPO: ${{ github.event.inputs.ksu_repo || 'https://github.com/KernelSU-Next/KernelSU-Next' }}
+      KSU_REF: ${{ github.event.inputs.ksu_ref || 'v3.4.0-legacy' }}
     steps:
 
-      - name: Get branch
-        id: branch
-        uses: tj-actions/branch-names@v8
+      # 先检出本仓库，拿到 droidspaces/ 下的配置块、补丁与校验清单
+      - name: Checkout workflow repo (droidspaces assets)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
 
       - name: Set SWAP
         uses: pierotofy/set-swap-space@master
@@ -20,8 +43,9 @@ jobs:
 
       - name: Setup environment
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt install gcc-arm-linux-gnueabi
+          sudo apt install -y gcc-arm-linux-gnueabi
           sudo apt-get install -y software-properties-common
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update
@@ -32,40 +56,155 @@ jobs:
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
           mkdir -p $GITHUB_WORKSPACE/workdir
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+
       - name: Get toolchain
         run: |
+          set -euo pipefail
           git clone https://github.com/kdrag0n/proton-clang.git -b 20210522 --depth 1 $GITHUB_WORKSPACE/workdir/clang
-      - name: Get source
+
+      - name: Get kernel source
         run: |
-          git clone --recursive https://github.com/Winkmoon/xiaomi_kernel_sm8250-test.git \
-          -b munch15-base \
-          --depth 1 $GITHUB_WORKSPACE/workdir/source
-      - name: Install FullKSU
+          set -euo pipefail
+          SRC=$GITHUB_WORKSPACE/workdir/source
+          echo "内核分支：$KERNEL_BRANCH"
+          if git clone --recursive --depth 1 -b "$KERNEL_BRANCH" \
+               "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "$SRC"; then
+            echo "[ok] 源码来源：${{ github.repository }} @ $KERNEL_BRANCH"
+          else
+            echo "[warn] 本仓库没有 $KERNEL_BRANCH，回退 Winkmoon 仓库"
+            rm -rf "$SRC"
+            git clone --recursive --depth 1 -b "$KERNEL_BRANCH" \
+              https://github.com/Winkmoon/xiaomi_kernel_sm8250-test.git "$SRC"
+            echo "[ok] 源码来源：Winkmoon/xiaomi_kernel_sm8250-test @ $KERNEL_BRANCH"
+          fi
+          cd "$SRC"
+          # 内核本地版本号
+          sed -i "\$s|echo \"\\\$res\"|echo \"-Xinran_StarBai_sm8250-test\"|" ./scripts/setlocalversion || true
+
+      - name: Install KernelSU-Next (pinned)
         run: |
+          set -euo pipefail
           cd $GITHUB_WORKSPACE/workdir/source
-          sed -i "\$s|echo \"\\\$res\"|echo \"-Xinran_StarBai_sm8250-test\"|" ./scripts/setlocalversion
-          wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch
-          patch -p1 < $GITHUB_WORKSPACE/workdir/source/ksu_hooks_sukisu_4.19.patch
-          rm -rf KernelSU
-          rm -rf KernelSU-Next
-          curl -LSs "https://raw.githubusercontent.com/Winkmoon/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          echo "KernelSU-Next: $KSU_REPO @ $KSU_REF"
+
+          # 4.19 手动 hook 补丁（SukiSU 提供，manual hook 模式必需）
+          wget -q -O ksu_hooks_sukisu_4.19.patch \
+            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch
+          patch -p1 < ksu_hooks_sukisu_4.19.patch
+
+          # 清掉旧的 KSU 集成（含已废弃的 KernelSU / KernelSU-Next 目录）
+          rm -rf KernelSU KernelSU-Next drivers/kernelsu drivers/ksu
+
+          # 按 tag / 分支 / commit 精确取源码，避免"最新分支"漂移
+          git init -q KernelSU-Next
           cd KernelSU-Next
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 10200)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+          git remote add origin "$KSU_REPO"
+          git fetch -q --depth 1 origin "$KSU_REF"
+          git -c advice.detachedHead=false checkout -q FETCH_HEAD
+          echo "KSU_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "KSU_SUBJECT=$(git log -1 --pretty=%s)" >> "$GITHUB_ENV"
           cd ..
-          echo "CONFIG_MODULE_SIG=n" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_MODULE_SIG_ALL=n" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_MODULES=y" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_KERNELSU_DEBUG=n" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_KSU=y" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_MANUAL_HOOK=y" >> ./arch/arm64/configs/munch_defconfig
-          echo "CONFIG_KERNELSU=y" >> ./arch/arm64/configs/munch_defconfig
-          sed -i '/atomic_set(&current->seccomp.filter_count, 0);/d' drivers/kernelsu/core_hook.c
-          
+
+          # 树内集成（等价于 KernelSU-Next/kernel/setup.sh 做的事）
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          # 小米 4.19 树 seccomp.filter_count 兼容处理（源码里出现才删）
+          grep -rl 'atomic_set(&current->seccomp.filter_count, 0);' drivers/kernelsu/ 2>/dev/null | while read -r f; do
+            sed -i '/atomic_set(&current->seccomp.filter_count, 0);/d' "$f"
+            echo "[patch] 去掉 seccomp.filter_count 复位：$f"
+          done
+
+      - name: Apply Droidspaces kernel patches
+        run: |
+          set -euo pipefail
+          cd $GITHUB_WORKSPACE/workdir/source
+          shopt -s nullglob
+          for p in "$GITHUB_WORKSPACE"/droidspaces/patches/*.patch; do
+            name=$(basename "$p")
+            if patch -p1 --forward --dry-run < "$p" > /dev/null 2>&1; then
+              patch -p1 --forward < "$p"
+              echo "[ok] 已打补丁：$name"
+            elif patch -p1 --reverse --dry-run < "$p" > /dev/null 2>&1; then
+              echo "[skip] 补丁已存在：$name"
+            else
+              echo "[error] 无法应用补丁：$name"
+              exit 1
+            fi
+          done
+
+      - name: Merge Droidspaces / KSU config
+        run: |
+          set -euo pipefail
+          cd $GITHUB_WORKSPACE/workdir/source
+          DEFCONFIG=arch/arm64/configs/munch_defconfig
+          # 有的分支把 defconfig 存成 munch_defconfig.txt，这里兜一下
+          if [ ! -f "$DEFCONFIG" ] && [ -f "${DEFCONFIG}.txt" ]; then
+            cp "${DEFCONFIG}.txt" "$DEFCONFIG"
+            echo "[warn] 用 ${DEFCONFIG}.txt 生成 ${DEFCONFIG}"
+          fi
+          [ -f "$DEFCONFIG" ] || { echo "[error] 找不到 $DEFCONFIG"; exit 1; }
+
+          if grep -q 'DROIDSPACES-CONFIG-BEGIN' "$DEFCONFIG"; then
+            echo "[skip] droidspaces 配置块已在分支里，无需追加"
+          else
+            { echo; cat "$GITHUB_WORKSPACE/droidspaces/droidspaces.config"; } >> "$DEFCONFIG"
+            echo "[ok] 已追加 droidspaces 配置块"
+          fi
+
+          add_cfg() {
+            grep -qx "$1" "$DEFCONFIG" || { echo "$1" >> "$DEFCONFIG"; echo "[cfg] $1"; }
+          }
+          add_cfg 'CONFIG_MODULES=y'
+          add_cfg 'CONFIG_MODULE_SIG=n'
+          add_cfg 'CONFIG_MODULE_SIG_ALL=n'
+          # 4.19 走 manual hook（配合上面的 SukiSU 补丁），不用 kprobe/tracepoint hook
+          add_cfg 'CONFIG_KSU=y'
+          add_cfg 'CONFIG_KSU_MANUAL_HOOK=y'
+          add_cfg 'CONFIG_KSU_DEBUG=n'
+
+      - name: Generate defconfig
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/workdir/clang/bin/:$PATH"
+          cd $GITHUB_WORKSPACE/workdir/source
+          make O=out ARCH=arm64 CC=clang munch_defconfig
+
+      - name: Verify Droidspaces / KSU config
+        run: |
+          set -euo pipefail
+          cd $GITHUB_WORKSPACE/workdir/source
+          CONFIG=out/.config
+          [ -f "$CONFIG" ] || { echo "[error] 没有生成 $CONFIG"; exit 1; }
+          fail=0
+          while read -r opt; do
+            case "$opt" in ''|\#*) continue;; esac
+            if grep -qx "$opt=y" "$CONFIG"; then
+              echo "[ok]   $opt=y"
+            else
+              echo "[FAIL] $opt 没生效（实际：$(grep -E "^(# )?${opt}=" "$CONFIG" | head -1)）"
+              fail=1
+            fi
+          done < "$GITHUB_WORKSPACE/droidspaces/required-config.txt"
+
+          if grep -qx '# CONFIG_USER_NS is not set' "$CONFIG"; then
+            echo "[ok]   CONFIG_USER_NS 保持关闭"
+          else
+            echo "[FAIL] CONFIG_USER_NS 应当关闭"; fail=1
+          fi
+          for opt in CONFIG_KSU CONFIG_KSU_MANUAL_HOOK; do
+            if grep -qx "$opt=y" "$CONFIG"; then
+              echo "[ok]   $opt=y"
+            else
+              echo "[FAIL] $opt 没生效"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || { echo "[error] 配置校验失败，停止构建"; exit 1; }
+
       - name: Build kernel
         run: |
-          export KBUILD_BUILD_USER=${{ github.actor }}
+          set -euo pipefail
           export ARCH=arm64
           export KBUILD_BUILD_HOST=欣然love白
           export KBUILD_BUILD_USER=kuan-@Xinran_StarBai
@@ -73,36 +212,32 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CROSS_COMPILE=aarch64-linux-gnu-
           cd $GITHUB_WORKSPACE/workdir/source
-          make O=out munch_defconfig CC=clang
           make -j$(nproc --all) O=out CC=clang LD=ld.lld
+
       - name: Verify output
         run: |
-          if [ -f $GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/Image ]; then
+          set -euo pipefail
+          IMG=$GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/Image
+          if [ -f "$IMG" ]; then
             echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
+            ls -lh "$IMG"
           else
-            echo "Error: Kernel Image not generated!"
+            echo "[error] 没生成 Image"
             exit 1
           fi
+
       - name: Package kernel
         if: env.CHECK_FILE_IS_OK == 'true'
         run: |
+          set -euo pipefail
+          SRC=$GITHUB_WORKSPACE/workdir/source
           rm -rf $GITHUB_WORKSPACE/workdir/ak3
           git clone https://github.com/Winkmoon/AnyKernel3.git $GITHUB_WORKSPACE/workdir/ak3
-          if [ ! -f $GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/Image ]; then
-            echo "Error: Kernel Image missing during packaging!"
-            exit 1
-          fi
-          cp $GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/Image $GITHUB_WORKSPACE/workdir/ak3
+          cp $SRC/out/arch/arm64/boot/Image $GITHUB_WORKSPACE/workdir/ak3
           cd $GITHUB_WORKSPACE/workdir/ak3
           zip -r9 ./AnyKernel3-${{ env.BUILD_TIME }}.zip ./*
-          if [ ! -f ./AnyKernel3-${{ env.BUILD_TIME }}.zip ]; then
-            echo "Error: Zip package not generated!"
-            echo "Current files in ak3 directory:"
-            ls -la
-            exit 1
-          fi
-          echo "Successfully generated zip package:"
-          ls -la ./AnyKernel3-${{ env.BUILD_TIME }}.zip
+          ls -lh ./AnyKernel3-${{ env.BUILD_TIME }}.zip
+
       - name: Upload artifacts (备份)
         uses: actions/upload-artifact@v4
         with:
@@ -117,16 +252,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: kernel-${{ env.BUILD_TIME }}
-          release_name: 小米sm8250 HyperOS 内核 ${{ env.BUILD_TIME }} FullManager
+          release_name: 红米K40S (munch) HyperOS 内核 ${{ env.BUILD_TIME }} / Droidspaces 6.6.0
           draft: false
-          prerelease: false  # 是否为预发布（false = 正式版，true = 测试版）
+          prerelease: false
           body: |
-            ## 小米平板5 (nabu) HyperOS 内核构建
+            ## 红米 K40S / POCO F4 (munch, sm8250-AC) HyperOS 内核
             - 构建时间：${{ env.BUILD_TIME }}
-            - 集成特性：KSU-全分支管理器支持
+            - 内核源码分支：${{ env.KERNEL_BRANCH }}
+            - KernelSU-Next：`${{ env.KSU_REF }}`（commit `${{ env.KSU_SHA }}`，FullKSU / manual hook 模式）
+            - Droidspaces：v6.6.0（non-GKI 配置 + cgroup file prefix 补丁），CONFIG_USER_NS 保持关闭
             - 打包工具：AnyKernel3
-            - 适用系统：MIUI13-HyperOS
+            - 适用系统：MIUI13 ~ HyperOS
             - 构建环境：Ubuntu 22.04 + Proton Clang 20210522
+
+            刷入后自检：`su -c 'droidspaces check'`，或 Droidspaces App → Settings → Requirements。
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:

@@ -143,3 +143,7 @@ kernel/configs/android-*.cfg
 out/
 *.zip
 *.log
+
+# Droidspaces CI assets (kernel .gitignore drops *.patch / patches by default)
+!droidspaces/patches/
+!droidspaces/patches/*.patch
