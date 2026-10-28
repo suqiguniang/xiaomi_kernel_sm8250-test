@@ -28,6 +28,9 @@ jobs:
       KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'munch15-base' }}
       KSU_REPO: ${{ github.event.inputs.ksu_repo || 'https://github.com/KernelSU-Next/KernelSU-Next' }}
       KSU_REF: ${{ github.event.inputs.ksu_ref || 'v3.4.0-legacy' }}
+    # 建 Release / 上传资产需要写权限（默认 token 只有读权限）
+    permissions:
+      contents: write
     steps:
 
       # 先检出本仓库，拿到 droidspaces/ 下的配置块、补丁与校验清单
@@ -298,7 +301,7 @@ jobs:
             ## 红米 K40S / POCO F4 (munch, sm8250-AC) HyperOS 内核
             - 构建时间：${{ env.BUILD_TIME }}
             - 内核源码分支：${{ env.KERNEL_BRANCH }}
-            - KernelSU-Next：`${{ env.KSU_REF }}`（commit `${{ env.KSU_SHA }}`，FullKSU / manual hook 模式）
+            - KernelSU-Next：`${{ env.KSU_REF }}`（commit `${{ env.KSU_SHA }}`，hook 模式 `${{ env.KSU_HOOK_MODE }}`）
             - Droidspaces：v6.6.0（non-GKI 配置 + cgroup file prefix 补丁），CONFIG_USER_NS 保持关闭
             - 打包工具：AnyKernel3
             - 适用系统：MIUI13 ~ HyperOS
