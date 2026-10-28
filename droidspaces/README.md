@@ -35,13 +35,17 @@ v6.6.0 的 `Documentation/resources/kernel-patches/non-GKI/` 里有两个补丁�
 
 ## KernelSU-Next 钉版本
 
-- 4.19 是非 GKI 老内核，走上游的 **`*-legacy`** 线（tag：`v3.4.0-legacy`）。
+- 4.19 是非 GKI 老内核，走上游的 **`*-legacy`** 线（tag：`v3.4.0-legacy`，commit `8af3d4f`）。
   上游 `v3.4.2` 已重构为 GKI/KMI 外部模块构建（`kernel/Makefile` 里 `check_symbol` + vmlinux 符号校验、没有 `compat/kernel_compat.o` 兼容层），**不能**用在 4.19 树内集成。
 - 集成方式与上游 `kernel/setup.sh` 等价：`drivers/kernelsu -> ../KernelSU-Next/kernel` 软链 + `drivers/Makefile` 追加 `obj-$(CONFIG_KSU) += kernelsu/` + `drivers/Kconfig` 加一行 source。
-- 老内核用 **manual hook**：`CONFIG_KSU_MANUAL_HOOK=y`，配合 CI 打的 `SukiSU_patch/4.19/ksu_hooks_sukisu_4.19.patch`。
-- 内核侧版本号由 KSU 自己的 Kbuild 算：`KSU_VERSION = 30000 + git rev-list --count + 289`，构建日志里有 `-- KernelSU-Next version: NNNNN`。
+- **hook 模式：`CONFIG_KSU_SYSCALL_TABLE_HOOK=y`**（直接改写 `sys_call_table`，4.19 够用，内核侧不需要任何手工钩子补丁）。
+  - 不要用 `CONFIG_KSU_MANUAL_HOOK`：它要求内核树里有 `ksu_handle_sys_reboot` 等一整套钩子，否则 Kbuild 直接 `error: No hooks were defined`；
+    SukiSU 的 `4.19/ksu_hooks_sukisu_4.19.patch` 是给老 fork 那套 API 写的，符号对不上（`ksu_vfs_read_hook`、`ksu_handle_sys_read` 参数个数都不同），不能混用。
+  - 只有在回退到 `Winkmoon/KernelSU-Next@next`（老 fork）时，工作流才自动切回 manual hook 并打 SukiSU 补丁。
+- 内核侧版本号由 KSU 自己的 Kbuild 算：`KSU_VERSION = 30000 + git rev-list --count + 289`。
+  当前 pin 的 `v3.4.0-legacy`（3005 个提交）→ **33294**，构建日志里会打印 `-- KernelSU-Next version: 33294`。
 - **管理器**：只能用 KernelSU-Next 官方签名 APK（内核里写死 `KSU_NEXT_MANAGER_SIZE=0x3e6`、`KSU_NEXT_MANAGER_HASH=79e59011…9821bf7`）。选 **v3.4.x 系列的 KernelSU-Next 管理器**（与本 tag 同源），不要用原版 KernelSU / SukiSU 管理器。
-- 回退方案：把 workflow 输入 `ksu_repo=https://github.com/Winkmoon/KernelSU-Next`、`ksu_ref=next` 即可回到原来的 fork 分支构建（那条线当前也能用，只是版本会漂移）。
+- 回退方案：把 workflow 输入 `ksu_repo=https://github.com/Winkmoon/KernelSU-Next`、`ksu_ref=next` 即可回到原来的 fork 分支构建（hook 模式会自动切换）。
 
 ## 怎么用
 

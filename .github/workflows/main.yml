@@ -87,18 +87,6 @@ jobs:
           cd $GITHUB_WORKSPACE/workdir/source
           echo "KernelSU-Next: $KSU_REPO @ $KSU_REF"
 
-          # 4.19 手动 hook 补丁（SukiSU 提供，manual hook 模式必需）
-          wget -q -O ksu_hooks_sukisu_4.19.patch \
-            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch
-          if patch -p1 --forward --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
-            patch -p1 --forward < ksu_hooks_sukisu_4.19.patch
-          elif patch -p1 --reverse --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
-            echo "[skip] 4.19 hook 补丁已存在"
-          else
-            echo "[error] 4.19 hook 补丁无法应用"
-            exit 1
-          fi
-
           # 清掉旧的 KSU 集成（含已废弃的 KernelSU / KernelSU-Next 目录）
           rm -rf KernelSU KernelSU-Next drivers/kernelsu drivers/ksu
 
@@ -111,6 +99,27 @@ jobs:
           echo "KSU_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "KSU_SUBJECT=$(git log -1 --pretty=%s)" >> "$GITHUB_ENV"
           cd ..
+
+          # 决定 hook 模式：
+          #  - 新版内核线（*-legacy）自带 syscall table 打补丁 hook，4.19 直接可用，内核侧不用改
+          #  - 老 fork 分支只有 manual hook，需要 SukiSU 的 4.19 钩子补丁
+          if grep -q 'KSU_SYSCALL_TABLE_HOOK' KernelSU-Next/kernel/Kconfig; then
+            echo "KSU_HOOK_MODE=syscall_table" >> "$GITHUB_ENV"
+            echo "[ok] hook 模式：syscall table 打补丁（内核侧无需 hand-patch）"
+          else
+            echo "KSU_HOOK_MODE=manual_legacy" >> "$GITHUB_ENV"
+            echo "[warn] hook 模式：manual（老 fork），应用 SukiSU 4.19 钩子补丁"
+            wget -q -O ksu_hooks_sukisu_4.19.patch \
+              https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/4.19/ksu_hooks_sukisu_4.19.patch
+            if patch -p1 --forward --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
+              patch -p1 --forward < ksu_hooks_sukisu_4.19.patch
+            elif patch -p1 --reverse --dry-run < ksu_hooks_sukisu_4.19.patch > /dev/null 2>&1; then
+              echo "[skip] 4.19 hook 补丁已存在"
+            else
+              echo "[error] 4.19 hook 补丁无法应用"
+              exit 1
+            fi
+          fi
 
           # 树内集成（等价于 KernelSU-Next/kernel/setup.sh 做的事）
           ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
@@ -166,10 +175,21 @@ jobs:
           add_cfg 'CONFIG_MODULES=y'
           add_cfg 'CONFIG_MODULE_SIG=n'
           add_cfg 'CONFIG_MODULE_SIG_ALL=n'
-          # 4.19 走 manual hook（配合上面的 SukiSU 补丁），不用 kprobe/tracepoint hook
+          # KSU hook 模式（4.19 不能用 kprobe/tracepoint hook）
           add_cfg 'CONFIG_KSU=y'
-          add_cfg 'CONFIG_KSU_MANUAL_HOOK=y'
           add_cfg 'CONFIG_KSU_DEBUG=n'
+          case "${KSU_HOOK_MODE:-syscall_table}" in
+            syscall_table)
+              add_cfg 'CONFIG_KSU_SYSCALL_TABLE_HOOK=y'
+              add_cfg '# CONFIG_KSU_MANUAL_HOOK is not set'
+              ;;
+            manual_legacy)
+              add_cfg 'CONFIG_KSU_MANUAL_HOOK=y'
+              ;;
+            *)
+              echo "[error] 未知 KSU_HOOK_MODE=${KSU_HOOK_MODE}"; exit 1
+              ;;
+          esac
 
       - name: Generate defconfig
         run: |
@@ -200,13 +220,25 @@ jobs:
           else
             echo "[FAIL] CONFIG_USER_NS 应当关闭"; fail=1
           fi
-          for opt in CONFIG_KSU CONFIG_KSU_MANUAL_HOOK; do
+          for opt in CONFIG_KSU; do
             if grep -qx "$opt=y" "$CONFIG"; then
               echo "[ok]   $opt=y"
             else
               echo "[FAIL] $opt 没生效"; fail=1
             fi
           done
+          case "${KSU_HOOK_MODE:-syscall_table}" in
+            syscall_table)
+              grep -qx 'CONFIG_KSU_SYSCALL_TABLE_HOOK=y' "$CONFIG" \
+                && echo "[ok]   CONFIG_KSU_SYSCALL_TABLE_HOOK=y" \
+                || { echo "[FAIL] CONFIG_KSU_SYSCALL_TABLE_HOOK 没生效"; fail=1; }
+              ;;
+            manual_legacy)
+              grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' "$CONFIG" \
+                && echo "[ok]   CONFIG_KSU_MANUAL_HOOK=y" \
+                || { echo "[FAIL] CONFIG_KSU_MANUAL_HOOK 没生效"; fail=1; }
+              ;;
+          esac
           [ "$fail" = 0 ] || { echo "[error] 配置校验失败，停止构建"; exit 1; }
 
       - name: Build kernel
